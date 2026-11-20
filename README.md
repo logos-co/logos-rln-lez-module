@@ -1,0 +1,162 @@
+# logos-rln-lez-module — the RLN registry provider (Rust)
+
+`rln_lez_module`, built on logos-rust-sdk / logos-module-builder. It
+serves the membership stack's chain access: registry reads (roots, merkle
+proofs, membership PDA + lifecycle state, registry bounds), the Register tx,
+and the faucet funding flow (`claim_tokens`/`get_token_balance`). Its two
+consumers are the membership module's registry provider and the membership
+UI's funding flow; identity/credential generation lives in the membership
+module, so this module never handles secrets. The chain logic lives in-crate
+(`rust-lib/src/rln_core.rs`, plain Rust); there is no C ABI.
+
+## Layout
+
+- `metadata.json` — module manifest: `codegen.rust` drives logos-module-builder
+  (lidl scaffold + Qt cdylib glue). No module dependencies since 3.0.0.
+- `rust-lib/rln_lez_module.lidl` — the module contract (9 methods,
+  no events).
+- `rust-lib/src/wallet.rs` — the wallet this module owns (LEZ `core_ffi`):
+  bring-up, the home it adopts or provisions (and for which network), account
+  reads and the one transaction it sends.
+- `rust-lib/networks.json` + `rust-lib/src/networks.rs` — the built-in table of
+  known networks (CAIP-2 reference → sequencer + registries), embedded at
+  compile time. Add one from an e2e descriptor with
+  `tools/add-network.sh <reference> <deployment.json>`.
+- `rust-lib/src/fee_state.rs` — the raw JSON-RPC reads `core_ffi` has no
+  call for: `getFeeState` (`get_fee_state`, since 4.2.0), `getLastBlockId`,
+  `getTransaction` and the head block's timestamp (chain time, since 6.0.0),
+  over ureq + rustls against the sequencer the wallet's config names.
+- `rust-lib/src/lib.rs` — the provider implementation (the handlers).
+- `rust-lib/src/rln_core.rs` — the RLN core (tree/proof/register/funding logic),
+  depending only on the shared `rln-layouts` crate.
+- `rust-lib/generated/provider_gen.rs` — gitignored scaffold the nix build
+  regenerates in-derivation; `nix run .#generate` materialises it for local
+  `cargo check`/tests (see "Staged sources").
+
+## Configuration
+
+| Variable | Meaning |
+|---|---|
+| `LEE_WALLET_HOME_DIR` | An existing wallet home to adopt; default `<instance_persistence_path>/wallet-home`. |
+| `LEZ_RLN_SEQUENCER` | Sequencer URL for a home this module provisions. |
+| `LEZ_RLN_NETWORK` | A network from `rust-lib/networks.json`, by reference (e.g. `devnet`). Alone it provisions the home from the table; beside `LEZ_RLN_SEQUENCER` it only labels the home so a registry on another network is refused. |
+| `LEZ_RLN_PAYER` | The account that pays (base58 or hex). |
+| `LEZ_RLN_PAYER_KEY` | A funded account's private key (32-byte hex), imported at bring-up. |
+
+Which chain a home talks to, first match wins:
+
+1. the home's existing `wallet_config.json` — adopted, never rewritten;
+2. `LEZ_RLN_SEQUENCER` (plus `LEZ_RLN_NETWORK` as an optional label);
+3. `LEZ_RLN_NETWORK` alone, looked up in the table;
+4. `use_network(reference)` — `rln_module.start` calls it with the
+   reference of its first `logos` registry id. Until then `wallet_status` is
+   `pending` ("no network selected …"), not `failed`.
+
+Cases 2-4 write `network.json` beside the config whenever the network has a
+name; a home bound that way is never re-pointed, and `use_network` refuses any
+other reference. A home without one (staged, or `LEZ_RLN_SEQUENCER` alone) is
+operator-configured and accepts any reference unchecked.
+
+## Staged sources (not committed)
+
+mkLogosModule's `rustCrateSrc` stages only the crate dir (plus
+`logos-rust-sdk-src`) into the nix sandbox, so path-deps must live inside the
+module tree. Two inputs the crate references are NOT in git:
+
+- `logos-rust-sdk-src/` — logos-co/logos-rust-sdk at the rev the locked
+  builder pins (the rev its codegen comes from).
+- `rust-lib/generated/provider_gen.rs` — the provider scaffold, emitted by
+  that builder's lidl-gen at the protocol
+  version it stamps (`LOGOS_PROTOCOL_VERSION_STRING` of its logos-protocol
+  input).
+
+Materialise both — they cannot drift from what the nix build compiles — with:
+
+```sh
+nix run .#generate
+```
+
+Re-run it after any flake.lock or `.lidl` change.
+
+`rln-layouts` (the shared borsh wire crate) is a normal cargo git dependency
+on logos-co/logos-lez-rln, pinned by rev in `rust-lib/Cargo.toml`; bump the
+rev together with any layout change (generally alongside a redeploy).
+
+## Build
+
+```sh
+nix build .#default
+# plugin: result/lib/rln_lez_module_plugin.dylib
+nix build .#lgx  # .lgx bundle for LEZ_RLN_LGX
+```
+
+## Live-registry tests (testnet)
+
+`src/testnet_tests.rs` validates rln_core's chain-facing logic — ConfigState
+offsets, PDA derivation, valid roots, merkle-proof construction (recomputed
+via poseidon), chain time, membership reads — against a DEPLOYED
+registration program. Read-only, off by default (each test skips unless
+gated), no new crate deps (`curl` subprocess speaks the sequencer's
+JSON-RPC `getAccount` — the same read the wallet serves this module at
+runtime):
+
+```sh
+LEZ_RLN_TESTNET_TESTS=1 cargo test testnet_ -- --nocapture
+LEZ_RLN_TESTNET_DEPLOYMENT=shared-5ade-v2 LEZ_RLN_TESTNET_TESTS=1 cargo test testnet_
+```
+
+The registry comes from a logos-lez-rln checkout's
+`deployments/<name>/deployment.json` (`LEZ_RLN_CHECKOUT`, default
+`../logos-lez-rln` beside this repo). These catch what unit pins can't:
+layout drift against the pinned guest image, PDA-derivation divergence,
+tree-encoding drift, chain-time unit changes. The default deployment is
+`testnet-faucet-260908`; name another with `LEZ_RLN_TESTNET_DEPLOYMENT` when
+the chain differs.
+
+## Design constraints (read before changing)
+
+- **`concurrency` is `multi`** (since 2.1.0; it was `single` until a blocked
+  handler was observed wedging the whole module: single-mode dispatch runs ON
+  the subprocess event loop, so one stuck call froze QtRO replica acquisition
+  itself until SIGKILL). Under multi the Qt glue runs each call on its own
+  worker; a stuck handler leaks one worker instead of starving every caller.
+  All state lives in lock-guarded statics; the impl struct has no fields.
+- **The wallet is this module's own, in-process** (`rust-lib/src/wallet.rs`),
+  since 3.0.0. It links LEZ's `core_ffi` library rather than calling the
+  `lez_core` module, because a host has exactly one `lez_core` wallet handle,
+  `open`/`create_new` both refuse while one is open, there is no close, and
+  nothing reads back the gas limit a wallet was opened with. A registration
+  needs ~9.1M cycles against a stock 2,000,000 default, so losing that race
+  meant every registration refused with a bare "Incorrect fee". The crate
+  keeps `#![deny(unsafe_code)]`: the Rust crate, never the C ABI.
+- **It cannot pay its own way, and that is structural.** A fee is reserved
+  from a *native* balance, the payer must sign so the wallet has to hold its
+  key, and native balance enters an account only at genesis, over the bridge,
+  or by transfer from something already funded. `LEZ_RLN_PAYER_KEY` hands in
+  one funded key — imported, so it grants that one account and wipes nothing,
+  unlike a mnemonic restore. A wallet home that already holds a funded payer
+  needs none of that: adopting one through `LEE_WALLET_HOME_DIR` brings its
+  payer derivation with it.
+- **Bring-up runs on its own thread.** `on_context_ready` fires on the host's
+  Qt main thread, and opening a wallet calibrates sequencers and then syncs
+  the chain. Handlers wait on a condvar for a bounded window and answer an
+  empty string if it has not settled; the status method is how a consumer
+  tells "still coming up" from "broken".
+- **The wallet sits behind a read-write lock.** Reads and sends take a shared
+  guard; deriving an account or syncing takes an exclusive one — the honest
+  model, since the wallet serves no reads while a sync runs. The state lock is
+  released before any call: holding it across a round trip would serialize
+  every handler, the wedge the `single` -> `multi` bump was made to escape.
+- **`REG_IN_FLIGHT` dedup in `register_member`**: callers can fire
+  register_member twice within seconds for the same membership. An on-chain
+  idempotency pre-check cannot see a tx that is still confirming (60-90s on
+  testnet), and the double submit reuses the payer nonce — the second tx is
+  silently dropped and, on a virgin tree, poisoned the submitting wallet's
+  nonce sequence. The in-session (config_account, id_commitment) map returns
+  the first submission's reply to duplicates.
+- **Funding methods** (`claim_tokens`/`get_token_balance`) mirror the
+  tx-account order + signing flags of the deployed programs exactly: claim
+  `[config, payment_def, dest(signer)]` under the registration program;
+  `get_token_balance` is tri-state (`""`=error, `{exists:false}`=absent,
+  `{exists:true,…}`=present) so the faucet poller can distinguish "unreachable"
+  from "not credited yet".

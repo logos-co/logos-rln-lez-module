@@ -1,0 +1,34 @@
+{
+  "format": "lez-rln-networks",
+  "version": 1,
+  "networks": [
+    {
+      "reference": "devnet",
+      "description": "LEZ devnet zone 2 (v0.2.5-rc3); used by logos-rln-e2e --target devnet, no delivery preset",
+      "sequencer": "http://209.38.241.182:3140/",
+      "registries": [
+        {
+          "deployment": "devnet-z2",
+          "config_account": "BbWaV7mqVx3kAk1h8rsjZ3cACzPrT4M2J7RVQSCXrDUU",
+          "tree_id": "166d398596959b1ff0f2aa99d669f6b2db4da88677dd6a60a8a38267ec4400b9",
+          "registration_program_id": "a908a461bf129a507a927fef446262c2428a082f846a78f88a816ba0153dfab1",
+          "merkle_program_id": "a2eda7e5f8fe44b2d119db89ba16dafb1452fe128ed0d526829095fd7018492c"
+        }
+      ]
+    },
+    {
+      "reference": "testnet",
+      "description": "LEZ testnet zone (v0.3.0, https://testnet.lez.logos.co) on the Logos blockchain testnet; registry used by the logos-delivery-module logos.test preset",
+      "sequencer": "https://testnet.lez.logos.co/",
+      "registries": [
+        {
+          "deployment": "testnet-v03-z3",
+          "config_account": "J3NXPWUspX2zqJU3tUbR6MHmm83aJc5AzvidEaBBKnat",
+          "tree_id": "4f3e8ef1b38ae86eb1e8180f6b864b10f0e5ff45b1a2e5ff84d8562b40fa0fc9",
+          "registration_program_id": "eb53eb29132ef2a4ae1073ee206ac584a7aeea560146c3a600f5f4034703ca68",
+          "merkle_program_id": "0a69f1b28291d32dc2d3442c2f333c22e5cfae891eb9a7e184b31c32156a8cee"
+        }
+      ]
+    }
+  ]
+}
